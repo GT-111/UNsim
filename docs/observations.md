@@ -30,6 +30,17 @@ each nonoverlapping observation window reports:
   flow and whole-link inventory do not identify space-mean or detector speed;
   the adapter deliberately does not call their ratio a measured speed.
 
+Inventory is calculated as `cumulative_arrivals - cumulative_departures`.
+For that difference to represent the true number of vehicles, both curves
+must use compatible baselines: at the initial time their difference must equal
+the initial link inventory. Native empty-start UNsim counts use a shared zero
+baseline. Adding the same constant to both curves preserves inventory; resetting
+the two counters independently does not. In general,
+`inventory(t) = inventory(t0) + (arrivals(t)-arrivals(t0)) -
+(departures(t)-departures(t0))`; unknown initial stock or independently
+rebased external counts must be aligned before calling this adapter. Its
+validity masks cannot detect an unknown but numerically plausible baseline.
+
 Do not multiply the NaN speed placeholder by a zero mask in a loss: IEEE
 arithmetic still returns NaN. Omit this unsupported channel or use a
 mask-aware `where` before arithmetic.

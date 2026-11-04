@@ -28,15 +28,41 @@ internal model identity to prevent accidental cross-model evaluation; this is
 a dependency on the present UNsim API. It is host-side and intended for small
 prototype batches, not a JIT-vectorized production training system.
 
+The helper accepts only supported scalar, built-in `ParameterRef` descriptors:
+link FD or plain physical fields, node fields and demand flow. It rejects toll
+blocks, toll `ParameterRef`s and custom/unknown injection functions; advanced
+uses should go through UNsim's original API and verify their own injection
+semantics. Each descriptor is rebuilt on the supplied model and checked field
+by field, including kind, field, index, name, unit, shape and FD parameterization.
+The descriptor itself has no model-owner identity: another model with identical
+descriptors is indistinguishable, and callers must decide whether its meaning
+is appropriate for the target model. Rebuild references on the intended model.
+Likewise, objective identity is checked but the helper has no forecast-time
+anchor and does not verify whether the objective uses only historical data.
+
+At most one fundamental-diagram field may be selected on any one link. The
+existing `VariableSet.inject` recalculates the FD state from the original link
+for each field, so selecting two fields of one link silently overwrites an
+earlier injection. This helper rejects that combination before simulation;
+different links and non-overlapping fields on the same link remain supported.
+
 For finite box bounds `lower < upper`, define `z=(theta-lower)/(upper-lower)`
 and the dimensionless-coordinate gradient
-`g_z = g_theta * (upper-lower)`. Normalize each gradient row by its own norm
-only if that norm exceeds `kappa` times the median of **nonzero** row norms.
+`g_z = g_theta * (upper-lower)`. Scale a gradient row down to the threshold
+only if its norm exceeds `kappa` times the median of **nonzero** row norms.
 The already-clipped batch then determines one RMS-normalized step multiplier;
 the resulting `z - multiplier*g_z` is projected to `[0,1]`, mapped back to
 physical units and detached with `jax.lax.stop_gradient` for regression.
-`delta` is an RMS step size in normalized box coordinates before projection;
-it is not a step size in veh/s or another physical unit. A row with zero
+Let `r` be the RMS of the clipped gradients over the live rows and all P
+coordinates. Before projection, the ideal-arithmetic update RMS is
+`delta * r / sqrt(r**2 + epsilon)`, at most the nominal `delta` in normalized
+box coordinates; it can be much smaller when gradients are small relative to
+`sqrt(epsilon)`. Projection cannot increase its distance from the starting
+point in ideal arithmetic. `delta` is not a step size in veh/s or another
+physical unit. Clipping scales a row only when its norm is strictly above the
+threshold; epsilon is used in RMS normalization, not added to each row norm.
+Rescaling before squaring reduces common FP32 underflow, but floating-point
+limits, rounding and subnormals still matter. A row with zero
 gradient remains unchanged; an all-zero batch reports no live rows, zero
 median and step, and an infinite unused clipping threshold. Nonfinite inputs,
 invalid bounds, out-of-box starting values and numerical overflow are rejected
@@ -80,6 +106,15 @@ not evidence of generalization, forecasting accuracy, or superiority to direct
 optimization. A held-out network/scenario comparison and complete simulation,
 regression and inference costs would be required for such a claim.
 
+`gradient_targets` validates inputs on the host with NumPy. Do not nest this
+public wrapper in `jax.jit` or differentiate through it with `jax.grad`; either
+operation on traced inputs raises a tracer-conversion error. Its detached labels
+can be passed to JAX training after construction. The test of JIT and
+stop-gradient on `_targets_math` concerns a private math core, not support for
+tracing the public wrapper. Similarly, `evaluate_objectives(..., jit=True)`
+requests JIT for its individual UNsim objective evaluations; it does not make
+the host batch wrapper itself JIT-compatible.
+
 JAX 0.12.0.1 and SciPy are available in the isolated CPU environment; Optax
 and Flax are not installed. The example uses JAX's existing
 `example_libraries.optimizers` (`sgd`, `adam`) and `stax` rather than adding a
@@ -91,7 +126,7 @@ From the UNsim repository root, after activating an isolated environment with
 JAX and the repository dependencies installed, run on CPU only:
 
 ```sh
-JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES=-1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+PYTHONPATH=. JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES=-1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
   MKL_NUM_THREADS=1 XLA_FLAGS='--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1' \
   python examples/example_gradient_targets.py
 ```
