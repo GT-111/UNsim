@@ -73,10 +73,11 @@ _FD_DERIVED = {
 }
 
 
-def _fd_triplet(link, fd_param, varying_field, theta):
-    """Compute (u, kappa, q_star) for one link with one field replaced by theta.
+def _fd_triplet(link, fd_param, values):
+    """Compute (u, kappa, q_star) for one link with independent fields replaced.
 
-    Derived FD quantities are recomputed as pure functions of theta so that the gradient semantics match the chosen parameterization.
+    Derived FD quantities are recomputed as pure functions of the selected
+    values so that gradient semantics match the chosen parameterization.
     Fixed quantities are taken from the authoring-layer Link object.
 
     Parameters
@@ -85,10 +86,8 @@ def _fd_triplet(link, fd_param, varying_field, theta):
         Authoring-layer link holding base FD values and tau.
     fd_param : str
         FD parameterization name ("u_kappa_tau", "u_w_capacity", "u_w_tau").
-    varying_field : str
-        The independent field replaced by theta.
-    theta : jnp scalar
-        Value of the varying field.
+    values : dict of {str: jnp scalar}
+        Independent fields to replace; omitted fields retain snapshot values.
 
     Returns
     -------
@@ -96,20 +95,20 @@ def _fd_triplet(link, fd_param, varying_field, theta):
     """
     tau = link.tau
     if fd_param == "u_kappa_tau":
-        u = theta if varying_field == "free_flow_speed" else link.u
-        kappa = theta if varying_field == "jam_density" else link.kappa
+        u = values.get("free_flow_speed", link.u)
+        kappa = values.get("jam_density", link.kappa)
         w = 1.0 / (tau * kappa)
         q_star = u * w * kappa / (u + w)
         return u, kappa, q_star
     if fd_param == "u_w_capacity":
-        u = theta if varying_field == "free_flow_speed" else link.u
-        w = theta if varying_field == "backward_wave_speed" else link.w
-        q_star = theta if varying_field == "capacity" else link.q_star
+        u = values.get("free_flow_speed", link.u)
+        w = values.get("backward_wave_speed", link.w)
+        q_star = values.get("capacity", link.q_star)
         kappa = q_star * (u + w) / (u * w)
         return u, kappa, q_star
     if fd_param == "u_w_tau":
-        u = theta if varying_field == "free_flow_speed" else link.u
-        w = theta if varying_field == "backward_wave_speed" else link.w
+        u = values.get("free_flow_speed", link.u)
+        w = values.get("backward_wave_speed", link.w)
         kappa = 1.0 / (tau * w)
         q_star = u * w * kappa / (u + w)
         return u, kappa, q_star
@@ -323,6 +322,45 @@ class VariableSet:
             self._offsets.append(offset)
             offset += ref.size
         self._total_size = offset
+        # Group only simultaneously selected independent FD parameters for the
+        # same link. Applying their triplets separately would reset earlier
+        # fields to the authoring snapshot and silently erase derivatives.
+        candidates = {}
+        for position, ref in enumerate(self._refs):
+            if (not isinstance(ref, (CustomVariable, TollVariable)) and
+                    getattr(ref, "kind", None) == "link" and
+                    getattr(ref, "field", None) in _FD_FIELDS):
+                index = ref.index
+                # Link resolution accepts Python-style negative indices; -1
+                # and n_links-1 must not become separate groups for one link.
+                n_links = len(self._model._world.LINKS)
+                if isinstance(index, (int, np.integer)) and -n_links <= index < 0:
+                    index += n_links
+                candidates.setdefault(index, []).append(position)
+        self._joint_fd_last = {}
+        self._joint_fd_skip = set()
+        for index, positions in candidates.items():
+            if len(positions) < 2:
+                continue
+            group = [self._refs[position] for position in positions]
+            if any(not isinstance(ref, ParameterRef) for ref in group):
+                raise ValueError("Joint FD injection requires builtin ParameterRef entries")
+            fields = [ref.field for ref in group]
+            if len(set(fields)) != len(fields):
+                raise ValueError(f"Duplicate FD field for link {index}: {fields}")
+            scheme = group[0].fd_parameterization
+            if any(ref.fd_parameterization != scheme for ref in group):
+                raise ValueError(f"Conflicting FD parameterizations for link {index}")
+            link = self._model._snapshot_link(index)
+            if scheme not in _FD_INDEPENDENT or scheme != link.fd_parameterization:
+                raise ValueError(f"FD parameterization does not match link {index}")
+            if any(ref.field not in _FD_INDEPENDENT[scheme] or ref.shape != () for ref in group):
+                raise ValueError(f"Joint FD fields must be independent scalars under {scheme}")
+            if any(isinstance(self._refs[pos], CustomVariable)
+                   for pos in range(positions[0] + 1, positions[-1])):
+                raise ValueError("CustomVariable cannot be interleaved with joint FD fields")
+            self._joint_fd_last[positions[-1]] = tuple(positions)
+            self._joint_fd_skip.update(positions[:-1])
 
     @property
     def size(self):
@@ -385,7 +423,9 @@ class VariableSet:
     def inject(self, theta, params):
         """Build a full Params with selected variables replaced by theta.
 
-        For FD fields, derived quantities are recomputed as functions of theta so that the differentiation semantics follow each link's FD parameterization.
+        For FD fields, derived quantities are recomputed as functions of theta
+        so differentiation follows each link's FD parameterization. Multiple
+        independent FD fields of the same link are recomputed jointly.
 
         Parameters
         ----------
@@ -398,7 +438,9 @@ class VariableSet:
         -------
         Params
         """
-        for ref, offset in zip(self._refs, self._offsets):
+        for position, (ref, offset) in enumerate(zip(self._refs, self._offsets)):
+            if position in self._joint_fd_skip:
+                continue
             if isinstance(ref, CustomVariable):
                 block = theta[offset:offset + ref.size].reshape(ref.shape)
                 new_params = ref.inject_fn(params, block)
@@ -422,7 +464,12 @@ class VariableSet:
                 )
             elif ref.kind == "link" and ref.field in _FD_FIELDS:
                 link = self._model._snapshot_link(i)
-                u, kappa, q_star = _fd_triplet(link, ref.fd_parameterization, ref.field, sl)
+                if position in self._joint_fd_last:
+                    values = {self._refs[pos].field: theta[self._offsets[pos]]
+                              for pos in self._joint_fd_last[position]}
+                else:
+                    values = {ref.field: sl}
+                u, kappa, q_star = _fd_triplet(link, ref.fd_parameterization, values)
                 params = params._replace(
                     u=params.u.at[i].set(u),
                     kappa=params.kappa.at[i].set(kappa),
