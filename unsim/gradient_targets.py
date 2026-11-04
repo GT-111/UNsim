@@ -183,8 +183,15 @@ def gradient_targets(parameters,physical_gradients,lower,upper,*,delta=0.05,kapp
     if np.any(x < low) or np.any(x > high):
         raise ValueError('initial parameters must lie in the declared box')
     if not (np.isfinite(delta) and delta >= 0 and np.isfinite(kappa) and kappa > 0
-            and np.isfinite(epsilon) and np.float32(epsilon) > 0):
+            and np.isfinite(epsilon) and epsilon > 0):
         raise ValueError('delta >= 0, kappa > 0 and epsilon > 0 must be finite')
+    # Some JAX backends flush FP32 subnormals to zero. Such an epsilon would
+    # silently remove the documented small-gradient regularization. Require
+    # a finite normal FP32 value rather than relying on backend FTZ behavior.
+    with np.errstate(over='ignore', under='ignore'):
+        epsilon32 = np.float32(epsilon)
+    if not np.isfinite(epsilon32) or epsilon32 < np.finfo(np.float32).tiny:
+        raise ValueError('epsilon must be a finite normal FP32 value')
     # Fail closed for magnitudes whose original FP32 squared row norm would
     # overflow; use FP64 on the host solely for this range check.
     g64 = g.astype(np.float64)*(high.astype(np.float64)-low.astype(np.float64))

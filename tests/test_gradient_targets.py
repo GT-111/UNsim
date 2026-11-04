@@ -9,6 +9,14 @@ from unsim.api import VariableSet
 from unsim.gradient_targets import _targets_math, evaluate_objectives, gradient_targets
 
 
+@pytest.mark.parametrize('epsilon', [1e-38, 1e-40, 1e100])
+def test_epsilon_rejects_subnormal_and_unrepresentable_fp32_values(epsilon):
+    # Accepting subnormal epsilon lets FTZ backends silently remove the RMS
+    # regularizer, even though the host scalar is finite and strictly positive.
+    with pytest.raises(ValueError, match='finite normal FP32'):
+        gradient_targets([[.5]], [[1e-20]], 0., 1., epsilon=epsilon)
+
+
 def test_live_row_median_clip_scaling_and_normalized_rms():
     parameters = np.full((4,2),.5,dtype=np.float32)
     gradients = np.array([[1,0],[2,0],[100,0],[0,0]],dtype=np.float32)

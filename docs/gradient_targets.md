@@ -62,7 +62,11 @@ point in ideal arithmetic. `delta` is not a step size in veh/s or another
 physical unit. Clipping scales a row only when its norm is strictly above the
 threshold; epsilon is used in RMS normalization, not added to each row norm.
 Rescaling before squaring reduces common FP32 underflow, but floating-point
-limits, rounding and subnormals still matter. A row with zero
+limits, rounding and subnormal gradients still matter. The public wrapper
+requires epsilon to be a finite normal FP32 value (at least
+`numpy.finfo(numpy.float32).tiny` after conversion): some JAX backends flush
+subnormal values to zero, which would silently remove the documented
+regularization. The default `1e-30` satisfies this requirement. A row with zero
 gradient remains unchanged; an all-zero batch reports no live rows, zero
 median and step, and an infinite unused clipping threshold. Nonfinite inputs,
 invalid bounds, out-of-box starting values and numerical overflow are rejected
