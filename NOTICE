@@ -1,0 +1,17 @@
+NablaMimic
+Copyright 2026 The NablaMimic Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes or adapts third-party material, listed with its licences in THIRD_PARTY_NOTICES.md:
+patches to MuJoCo Warp (Apache-2.0, The Newton Developers), constants transcribed from mjlab (Apache-2.0,
+The mjlab Developers), a re-implementation following rsl_rl's PPO (BSD-3-Clause, ETH Zurich and NVIDIA), BeyondMimic's
+adaptive sampling (MIT, The Isaac Lab Project Developers) and the BONES-SEED name filter of GR00T-WholeBodyControl
+(Apache-2.0, NVIDIA).
+
+The text above is the attribution notice from NablaMimic commit
+bfbb2a6773b4776c17402a34a93ec7589d9c7c18, included to preserve its notice.
+UNsim's `unsim/gradient_targets.py` independently adapts its live-row median
+gradient-clipping and gradient-derived regression-target ideas; it does not
+incorporate the other third-party components listed in that upstream notice.
+Source: https://github.com/OamIcs/NablaMimic
